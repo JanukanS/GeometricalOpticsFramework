@@ -3,13 +3,47 @@ import scipy.integrate as sc
 import scipy.interpolate as interp
 import matplotlib.pyplot as plt
 import pickle
-import testODESwig
+#import testODESwig
 import ode_func as odef
 import multiprocessing as mp
-TimeBlock = 1e-12
+
+class Profile:
+    pass
+
+class RectangularProfile(Profile):
+    def __init__(self,originVector,dimensions,densityInterpolator,temperatureInterpolator):
+        #Desc: Initializes a rectangular plasma profile
+        #Inputs:
+        #originVector: 3 element value of x,y,z assume float
+        #dimensions: 3 element value of width(x),length(y) and height(z), assume positive float
+        #densityInterpolator: function which can return electron density using coordinates as input
+        #temperatureInterpolator: function which can return electron temperature using coordinates as input
+        #Output: Rectangular Profile object
+        self.xBounds = [originVector[0],originVector[0] + dimensions[0]]
+        self.yBounds = [originVector[1],originVector[1] + dimensions[1]]
+        self.zBounds = [originVector[2],originVector[0] + dimensions[0]]
+        self.ne_interp = densityInterpolator
+        self.te_interp = temperatureInterpolator
+
+    def withinBounds(self,coord):
+        #Desc: Checks whether if the specified coordinate is within the Profile
+        #Inputs:
+        #coord: 3 element value assume float
+        #Output: True or False
+        if self.xBounds[0] <= coord[0] and self.xBounds[1] >= coord[0]:
+            if self.yBounds[0] <= coord[1] and self.yBounds[1] >= coord[1]:
+                if self.zBounds[0] <= coord[2] and self.zBounds[1] >= coord[2]:
+                    return True
+                else:
+                    return False
+            else:
+                return False
+        else:
+            return False
+
 
 class segmentBlock:
-    def __init__(self,timeseries,functionList):
+    def __init__(self,timeseries):
         self.ray_time = timeseries
         L = timeseries.shape(0)
         self.ray_flags = np.zeros([L])
@@ -21,8 +55,6 @@ class segmentBlock:
         self.ray_te[id_ray] = np.zeros([L])
         self.ray_absolute_path[id_ray] = np.zeros([L])
         self.ray_conditions[id_ray] = np.zeros([L])
-        self.valid_functions = functionList
-
     def refresh(self,timeseries):
         self.ray_time = timeseries
         L = timeseries.shape(0)
@@ -35,30 +67,6 @@ class segmentBlock:
         self.ray_te[id_ray] = np.zeros([L])
         self.ray_absolute_path[id_ray] = np.zeros([L])
         self.ray_conditions[id_ray] = np.zeros([L])
-
-    def clip_data(self,data_ind):
-        self.ray_time = self.ray_time[:data_ind];
-        self.ray_flags  = self.ray_flags[:data_ind];
-        self.ray_position = self.ray_position[:,:data_ind];
-        self.ray_wave_vector = self.ray_wave_vector[:,:data_ind]
-        self.ray_frequency = self.ray_frequency[:data_ind]
-        self.ray_polarization = self.ray_polarization[:,:data_ind]
-        self.ray_ne = self.ray_ne[:data_ind]
-        self.ray_te = self.ray_te[:data_ind]
-        self.ray_absolute_path = self.ray_absolute_path[:data_ind]
-        self.ray_conditions = self.ray_conditions[:,:data_ind]
-
-    def validateData(self):
-        origLength = timeseries.shape(0)
-        cutoff = timeseries.shape(0)
-        for valid_fx in self.valid_functions:
-            cutoff = min(cutoff,valid_fx(self))
-        self.clip_data(cutoff)
-        if cutoff != origLength:
-            return 1 #return state for cutoff
-        else:
-            return 0 #return state for unmodified data
-
 
 #automate backpropgation, a decreasing time step should inidicate backpropagation
 class ray_pile:
@@ -211,7 +219,7 @@ class ray_pile:
         outputList = np.array(inputList)
         return -1*outputList
 
-    def prop_em_step1(self,id_ray,segment,backprop = False):
+    def prop_em_step1(self,id_ray,backprop = False):
         """
         calculates the path of the ray and its wave vector along the path of light rays
         id_ray: corresponds to index of the ray
@@ -220,14 +228,14 @@ class ray_pile:
 
         #in the case of backpropagation, the time is flipped
         if backprop:
-            time_bound = [segment.ray_time[-1],segment.ray_time[0]]
+            time_bound = [self.ray_time[id_ray][-1],self.ray_time[id_ray][0]]
         else:
-            time_bound = [segment.ray_time[0],segment.ray_time[-1]]
+            time_bound = [self.ray_time[id_ray][0],self.ray_time[id_ray][-1]]
 
         #creates the initial values for ode solver, first 3 are for position, last 3 for wve vector
         init_con = np.zeros([6])
-        init_con[:3] = segment.ray_position[:,0]
-        init_con[3:] = segment.ray_wave_vector[:,0]
+        init_con[:3] = self.ray_position[id_ray][:,0]
+        init_con[3:] = self.ray_wave_vector[id_ray][:,0]
         #in the case of backpropagation, flip time
         if backprop:
             ''' might deprecate
@@ -248,59 +256,58 @@ class ray_pile:
             #solve for properties of the forward travelling wave
             ray_sol = sc.solve_ivp(self.ode_time_t_em,time_bound,init_con,t_eval=self.ray_time[id_ray],rtol=1e-4)
         #store the values calculated
-        segment.ray_position = ray_sol.y[0:3,:]
-        segment.ray_wave_vector = ray_sol.y[3:6,:]
+        self.ray_position[id_ray] = ray_sol.y[0:3,:]
+        self.ray_wave_vector[id_ray] = ray_sol.y[3:6,:]
         #calculate and store values for electron density, electron temperature and ray_frequency
         for index,tval in enumerate(self.ray_time[id_ray]):
-            segment.ray_ne[index] = self.ne_interp_func(segment.ray_position[:,index],tval)[0]
+            self.ray_ne[id_ray][index] = self.ne_interp_func(self.ray_position[id_ray][:,index],tval)[0]
             #print(self.ne_interp_func(self.ray_position[id_ray][:,index],tval)[0])
-            segment.ray_te[index] = self.te_interp_func(segment.ray_position[:,index],tval)[0]
+            self.ray_te[id_ray][index] = self.te_interp_func(self.ray_position[id_ray][:,index],tval)[0]
             k = np.sqrt(sum(self.ray_wave_vector[id_ray][:,index]**2))
-            segment.ray_frequency[index] = odef.dispersion_light(k,segelfment.ray_ne[index])
+            self.ray_frequency[id_ray][index] = odef.dispersion_light(k,self.ray_ne[id_ray][index])
 
 
-    def prop_em_step2(self,id_ray,segment):
+    def prop_em_step2(self,id_ray):
         """
         calculate the polarization along the path of a light ray
         id_ray:integer: index value of the ray to find polarization for
         """
         #parametrize the path distance
-        diff = np.linalg.norm(np.abs(segment.ray_position[:,1:] - segment.ray_position[:,0:-1]),ord=2,axis = 0,keepdims=True)
-        for pos_ind in range(1,segment.ray_absolute_path.shape[0]):
-            segment.ray_absolute_path[pos_ind] = segment.ray_absolute_path[pos_ind-1] + diff[0,pos_ind-1]
+        diff = np.linalg.norm(np.abs(self.ray_position[id_ray][:,1:] - self.ray_position[id_ray][:,0:-1]),ord=2,axis = 0,keepdims=True)
+        for pos_ind in range(1,self.ray_absolute_path[id_ray].shape[0]):
+            self.ray_absolute_path[id_ray][pos_ind] = self.ray_absolute_path[id_ray][pos_ind-1] + diff[0,pos_ind-1]
         #path bounds specify the limits for the ode_solver
-        path_bounds = [0,segment.ray_absolute_path[-1]]
+        path_bounds = [0,self.ray_absolute_path[id_ray][-1]]
         #calculate necessary values for the ode solver
-        wave_vec_mag = np.linalg.norm(segment.ray_wave_vector, ord=2, axis=0, keepdims=True)
-        unit_wave_vector = np.zeros(segment.ray_wave_vector.shape)
-        unit_wave_diff = np.zeros(segment.ray_wave_vector.shape)
+        wave_vec_mag = np.linalg.norm(self.ray_wave_vector[id_ray], ord=2, axis=0, keepdims=True)
+        unit_wave_vector = np.zeros(self.ray_wave_vector[id_ray].shape)
+        unit_wave_diff = np.zeros(self.ray_wave_vector[id_ray].shape)
         for index in [0,1,2]:
-            unit_wave_vector[index,:] = segment.ray_wave_vector[index,:]/wave_vec_mag
-            unit_wave_diff[index,:] = np.gradient(unit_wave_vector[index,:],segment.ray_absolute_path)
+            unit_wave_vector[index,:] = self.ray_wave_vector[id_ray][index,:]/wave_vec_mag
+            unit_wave_diff[index,:] = np.gradient(unit_wave_vector[index,:],self.ray_absolute_path[id_ray])
             #print(unit_wave_diff)
         #generate interpolators for wave vector and wave vector gradient
-        wave_vector_interp = interp.interp1d(segment.ray_absolute_path,unit_wave_vector)
-        wave_vector_gradient_interp = interp.interp1d(segment.ray_absolute_path,unit_wave_diff)
+        wave_vector_interp = interp.interp1d(self.ray_absolute_path[id_ray],unit_wave_vector)
+        wave_vector_gradient_interp = interp.interp1d(self.ray_absolute_path[id_ray],unit_wave_diff)
         #create a lambda function to pass into ode solver
         path_ode = lambda x,y: odef.ode_set2(x,y,wave_vector_interp(x),wave_vector_gradient_interp(x))
-        init_pol_con = segment.ray_polarization[:,0]
+        init_pol_con = self.ray_polarization[id_ray][:,0]
         #solve and store polarization
-        ray_pol_sol = sc.solve_ivp(path_ode,path_bounds,init_pol_con,t_eval=segment.ray_absolute_path,rtol=5e-4,method='LSODA')
-        segment.ray_polarization = ray_pol_sol.y[0:3,:]
+        ray_pol_sol = sc.solve_ivp(path_ode,path_bounds,init_pol_con,t_eval=self.ray_absolute_path[id_ray],rtol=5e-4,method='LSODA')
+        self.ray_polarization[id_ray] = ray_pol_sol.y[0:3,:]
 
     def propagate_ray(self,id_ray,backprop=False):
         """
         call function to direct wave propagation by calling other functions
         set backprop = True if time is decreasing (back propagation)
         """
-        segInst = segmentBlock(np.linspace(0,TimeBlock,1000))
         if self.ray_id[id_ray][1] == 0: #process for light ray
-            self.prop_em_step1(id_ray,segInst,backprop)
-            self.prop_em_step2(id_ray,segInst)
+            self.prop_em_step1(id_ray,backprop)
+            self.prop_em_step2(id_ray)
         elif self.ray_id[id_ray][1] == 1: #process for plasma ray
             self.prop_pl_step1(id_ray,backprop)
 
-    def prop_pl_step1(self,id_ray,segInst,backprop=False):
+    def prop_pl_step1(self,id_ray,backprop=False):
         """
         Plasma Ray Propagation
         id_ray: index of ray
@@ -449,12 +456,23 @@ class ray_pile:
         while data_clipped == False and i < len(self.ray_time[id_ray]):
             lambda_debye = odef.calc_lambda_debye(self.ray_ne[id_ray][i],self.ray_te[id_ray][i])
             k_val = np.sqrt(np.sum(self.ray_wave_vector[id_ray][0,i]**2 + self.ray_wave_vector[id_ray][1,i]**2  + self.ray_wave_vector[id_ray][2,i]**2 ))
-            if k_val*lambda_debye < 0.3:
+            if k_val*lambda_debye > 0.3:
                 self.clip_data(id_ray,i)
                 data_clipped = True
-                print('Clipping occured')
+                print(k_val*lambda_debye)
             i += 1
 
+    def clip_data(self,id_ray,data_ind):
+        self.ray_time[id_ray] = self.ray_time[id_ray][:data_ind];
+        self.ray_flags[id_ray]  = self.ray_flags[id_ray][:data_ind];
+        self.ray_position[id_ray] = self.ray_position[id_ray][:,:data_ind];
+        self.ray_wave_vector[id_ray] = self.ray_wave_vector[id_ray][:,:data_ind]
+        self.ray_frequency[id_ray] = self.ray_frequency[id_ray][:data_ind]
+        self.ray_polarization[id_ray] = self.ray_polarization[id_ray][:,:data_ind]
+        self.ray_ne[id_ray] = self.ray_ne[id_ray][:data_ind]
+        self.ray_te[id_ray] = self.ray_te[id_ray][:data_ind]
+        self.ray_absolute_path[id_ray] = self.ray_absolute_path[id_ray][:data_ind]
+        self.ray_conditions[id_ray] = self.ray_conditions[id_ray][:,:data_ind]
 
     def fuse_data(self,id_ray,segment):
         self.ray_time[id_ray] = np.concatenate(self.ray_time[id_ray],segment.ray_time[1:])
